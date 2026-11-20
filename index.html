@@ -231,6 +231,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
     el._item = item;
     el.querySelector('.kata').textContent = item.k;
     fitCard(el, item.k);
+    loadVoice(item.k);   // 提前把这张的发音下好
   }
 
   /* ---------- 答案 ---------- */
@@ -268,7 +269,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
         spring(sp._c, 'o', 1, {k:260, c:32, eps:.01}, sp, applyChar);
       }, d);
     })(spans[i], i * gap);
-    setTimeout(speak, 140);
+    speak(.14);   // 在点击当下就排好，iOS 才放行
   }
 
   /* ---------- 翻下一张 ---------- */
@@ -361,30 +362,45 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
   deck.addEventListener('pointercancel', endDrag);
 
   /* ---------- 音效（WebAudio 现场合成） ---------- */
-  var ac = null, master = null, noise = null;
-  function unlockAudio(){
+  var ac = null, master = null, noise = null, armedAt = -1e9;
+  // iPhone 静音键开着也要出声
+  function setSession(){ try { if (navigator.audioSession && navigator.audioSession.type !== 'playback') navigator.audioSession.type = 'playback'; } catch(e){} }
+  function initAudio(){
+    if (ac) return;
+    setSession();
     try {
-      if (!ac) {
-        var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
-        ac = new AC(); master = ac.createGain(); master.gain.value = .9; master.connect(ac.destination);
-        noise = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
-        var d = noise.getChannelData(0); for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
-      }
-      if (ac.state === 'suspended') ac.resume();
-    } catch(e){}
+      var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+      ac = new AC(); master = ac.createGain(); master.gain.value = .9; master.connect(ac.destination);
+      noise = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+      var d = noise.getChannelData(0); for (var i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    } catch(e){ ac = null; }
   }
+  // iOS 只认 touchend / click / keydown 这类手势里的解锁
+  function unlockAudio(e){
+    initAudio(); if (!ac) return;
+    setSession();
+    try {
+      if (ac.state !== 'running') {
+        ac.resume();
+        var s = ac.createBufferSource(); s.buffer = ac.createBuffer(1, 1, 22050); s.connect(ac.destination); s.start(0);
+      }
+      if (e && /^(touchend|click|keydown|pointerup)$/.test(e.type)) armedAt = performance.now();
+    } catch(err){}
+  }
+  function live(){ return !!ac && (ac.state === 'running' || performance.now() - armedAt < 1500); }
+  ['pointerdown', 'pointerup', 'touchend', 'click', 'keydown'].forEach(function(t){ document.addEventListener(t, unlockAudio, true); });
   function env(g, t, a, p, d){ g.gain.setValueAtTime(.0001, t); g.gain.exponentialRampToValueAtTime(p, t + a); g.gain.exponentialRampToValueAtTime(.0001, t + a + d); }
   function noiseSrc(t, dur){ var n = ac.createBufferSource(); n.buffer = noise; n.start(t, Math.random() * .6, dur); return n; }
   var sfx = {
     // 纸牌划过空气
-    swish: function(I){ if (!ac) return; try {
+    swish: function(I){ if (!live()) return; try {
       var t = ac.currentTime, n = noiseSrc(t, .32), bp = ac.createBiquadFilter(), g = ac.createGain();
       bp.type = 'bandpass'; bp.Q.value = .9;
       bp.frequency.setValueAtTime(650, t); bp.frequency.exponentialRampToValueAtTime(2900, t + .17);
       env(g, t, .03, .2 * (I || 1), .18); n.connect(bp); bp.connect(g); g.connect(master);
     } catch(e){} },
     // 牌落在桌上
-    thock: function(){ if (!ac) return; try {
+    thock: function(){ if (!live()) return; try {
       var t = ac.currentTime, f = 165 * (.94 + Math.random() * .12);
       var o = ac.createOscillator(), g = ac.createGain();
       o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * .45, t + .1);
@@ -394,7 +410,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
       env(g2, t, .002, .26, .05); n.connect(lp); lp.connect(g2); g2.connect(master);
     } catch(e){} },
     // 揭晓：小铃
-    rin: function(){ if (!ac) return; try {
+    rin: function(){ if (!live()) return; try {
       var t = ac.currentTime, f = 1175;
       [[1, .1, 1.5], [1.004, .07, 1.4], [2.71, .035, .7], [5.2, .012, .3]].forEach(function(p){
         var o = ac.createOscillator(), g = ac.createGain();
@@ -403,7 +419,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
       });
     } catch(e){} },
     // 切换
-    tick: function(){ if (!ac) return; try {
+    tick: function(){ if (!live()) return; try {
       var t = ac.currentTime, n = noiseSrc(t, .06), bp = ac.createBiquadFilter(), g = ac.createGain();
       bp.type = 'bandpass'; bp.frequency.value = 3200; bp.Q.value = 2;
       env(g, t, .001, .22, .035); n.connect(bp); bp.connect(g); g.connect(master);
@@ -411,20 +427,44 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
   };
   function buzz(ms){ try { if (navigator.vibrate) navigator.vibrate(ms); } catch(e){} }
 
-  /* ---------- 发音：预录音频，失败退回系统朗读 ---------- */
-  var audio = null;
+  /* ---------- 发音：预录音频走 WebAudio（解锁一次后随时能播），不行再用 <audio>，最后系统朗读 ---------- */
+  var voices = {}, voiceKeys = [], srcNode = null, audio = null, token = 0;
+  function voiceUrl(text){ return 'audio/' + K.audioName(text) + '.mp3'; }
+  function loadVoice(text){
+    if (!ac || !window.fetch || !window.Promise) return null;
+    if (voices[text]) return voices[text];
+    var p = fetch(voiceUrl(text)).then(function(r){ if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
+      .then(function(ab){ return new Promise(function(res, rej){ ac.decodeAudioData(ab, res, rej); }); });
+    p.catch(function(){ delete voices[text]; });
+    voiceKeys.push(text);
+    if (voiceKeys.length > 12) delete voices[voiceKeys.shift()];
+    return (voices[text] = p);
+  }
   function stopAudio(){
+    token++;
+    if (srcNode) { try { srcNode.stop(); } catch(e){} srcNode = null; }
     if (audio) { try { audio.pause(); } catch(e){} audio = null; }
     voice.classList.remove('playing');
     if (window.speechSynthesis) try { speechSynthesis.cancel(); } catch(e){}
   }
-  function speak(){
+  function speak(delay){
     stopAudio();
-    var text = cur.k, a = new Audio('audio/' + K.audioName(text) + '.mp3');
-    audio = a; voice.classList.add('playing');
-    a.onended = function(){ if (audio === a) voice.classList.remove('playing'); };
-    a.onerror = function(){ if (audio === a) fallback(text); };
-    var p = a.play(); if (p && p.catch) p.catch(function(){ if (audio === a) fallback(text); });
+    var text = cur.k, my = token, p = loadVoice(text);
+    voice.classList.add('playing');
+    if (!p) { playEl(text, my); return; }
+    p.then(function(buf){
+      if (my !== token) return;
+      if (!live()) { playEl(text, my); return; }
+      var s = ac.createBufferSource(); s.buffer = buf; s.connect(ac.destination);
+      s.onended = function(){ if (my === token) voice.classList.remove('playing'); };
+      s.start(ac.currentTime + (delay || 0)); srcNode = s;
+    }, function(){ if (my === token) playEl(text, my); });
+  }
+  function playEl(text, my){
+    var a = new Audio(voiceUrl(text)); audio = a;
+    a.onended = function(){ if (my === token) voice.classList.remove('playing'); };
+    a.onerror = function(){ if (my === token) fallback(text); };
+    var p = a.play(); if (p && p.catch) p.catch(function(){ if (my === token) fallback(text); });
   }
   function fallback(text){
     voice.classList.remove('playing');
@@ -442,7 +482,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
   voice.addEventListener('pointerdown', unlockAudio);
   mainBtn.onclick = function(){ revealed ? nextByButton() : reveal(); };
   ans.onclick = function(){ unlockAudio(); if (!revealed) reveal(); };
-  voice.onclick = function(){ unlockAudio(); speak(); };
+  voice.onclick = function(){ unlockAudio(); speak(0); };
 
   var segBtns = document.querySelectorAll('#seg button'), th = {x:0};
   function applyThumb(){ thumb.style.transform = 'translateX(' + th.x.toFixed(2) + 'px)'; }
@@ -471,6 +511,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
   window.addEventListener('resize', function(){ cards.forEach(function(c){ if (c._item) fitCard(c, c._item.k); }); if (cur) fillAnswer(); setRevealed(revealed); if (revealed) for (var i = 0; i < hira.children.length; i++) { var sp = hira.children[i]; sp._c = {y:0, s:1, o:1}; applyChar(sp); } });
 
   /* ---------- 开局：发一张，翻过来 ---------- */
+  initAudio();
   syncSeg(false);
   cur = draw();
   var first = cards[0];
