@@ -269,7 +269,7 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
         spring(sp._c, 'o', 1, {k:260, c:32, eps:.01}, sp, applyChar);
       }, d);
     })(spans[i], i * gap);
-    speak(.14);   // 在点击当下就排好，iOS 才放行
+    speak(0);   // 在点击当下就播，iOS 才放行
   }
 
   /* ---------- 翻下一张 ---------- */
@@ -434,7 +434,15 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
     if (!ac || !window.fetch || !window.Promise) return null;
     if (voices[text]) return voices[text];
     var p = fetch(voiceUrl(text)).then(function(r){ if (!r.ok) throw new Error(r.status); return r.arrayBuffer(); })
-      .then(function(ab){ return new Promise(function(res, rej){ ac.decodeAudioData(ab, res, rej); }); });
+      .then(function(ab){ return new Promise(function(res, rej){ ac.decodeAudioData(ab, res, rej); }); })
+      .then(function(buf){
+        // 录音前后各有一段空白，播的时候跳过
+        var d = buf.getChannelData(0), n = d.length, i = 0, j = n - 1, sr = buf.sampleRate;
+        while (i < n && Math.abs(d[i]) < .02) i++;
+        while (j > i && Math.abs(d[j]) < .02) j--;
+        var off = Math.max(0, i / sr - .012), end = Math.min(buf.duration, j / sr + .12);
+        return {buf:buf, off:off, dur:Math.max(.05, end - off)};
+      });
     p.catch(function(){ delete voices[text]; });
     voiceKeys.push(text);
     if (voiceKeys.length > 12) delete voices[voiceKeys.shift()];
@@ -452,12 +460,12 @@ html,body{margin:0;height:100%;overflow:hidden;background:var(--paper)}
     var text = cur.k, my = token, p = loadVoice(text);
     voice.classList.add('playing');
     if (!p) { playEl(text, my); return; }
-    p.then(function(buf){
+    p.then(function(v){
       if (my !== token) return;
       if (!live()) { playEl(text, my); return; }
-      var s = ac.createBufferSource(); s.buffer = buf; s.connect(ac.destination);
+      var s = ac.createBufferSource(); s.buffer = v.buf; s.connect(ac.destination);
       s.onended = function(){ if (my === token) voice.classList.remove('playing'); };
-      s.start(ac.currentTime + (delay || 0)); srcNode = s;
+      s.start(ac.currentTime + (delay || 0), v.off, v.dur); srcNode = s;
     }, function(){ if (my === token) playEl(text, my); });
   }
   function playEl(text, my){
